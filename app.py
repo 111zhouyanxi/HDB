@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 import pydeck as pdk
+import os
 
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
@@ -45,8 +46,10 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 中文显示
-plt.rcParams['font.sans-serif'] = ['SimHei']
+# --------------------------
+# ✅ 修复：云端不支持 SimHei，改用通用字体
+# --------------------------
+plt.rcParams['font.family'] = ['DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
 
 # =====================================================
@@ -57,17 +60,19 @@ st.title("新加坡 HDB 组屋转售价格分析与预测系统")
 st.markdown("---")
 
 # =====================================================
-# 读取数据
+# ✅ 修复：绝对路径读取 CSV，确保云端能找到
 # =====================================================
 
 @st.cache_data
 def load_data():
-
-    df = pd.read_csv("hdb_resale_data.csv")
+    # 获取当前文件所在目录
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    csv_path = os.path.join(current_dir, "hdb_resale_data.csv")
+    
+    df = pd.read_csv(csv_path)
 
     # 时间处理
     df['month'] = pd.to_datetime(df['month'])
-
     df['year'] = df['month'].dt.year
 
     # 房龄
@@ -280,9 +285,8 @@ if menu == "数据概览":
             ax=ax
         )
 
-        ax.set_title("各镇区平均房价")
-
-        ax.set_ylabel("平均房价")
+        ax.set_title("Town Average Price")
+        ax.set_ylabel("Average Resale Price")
 
         st.pyplot(fig)
 # =====================================================
@@ -299,11 +303,9 @@ elif menu == "房价趋势分析":
 
     yearly_price.plot(marker='o', ax=ax)
 
-    ax.set_title("年度平均房价趋势")
-
-    ax.set_xlabel("年份")
-
-    ax.set_ylabel("平均房价")
+    ax.set_title("Yearly Average Price Trend")
+    ax.set_xlabel("Year")
+    ax.set_ylabel("Average Price")
 
     ax.grid()
 
@@ -325,9 +327,8 @@ elif menu == "镇区分析":
 
     town_price.head(10).plot(kind='bar', ax=ax)
 
-    ax.set_title("均价最高的10个镇区")
-
-    ax.set_ylabel("平均房价")
+    ax.set_title("Top 10 Towns by Average Price")
+    ax.set_ylabel("Average Resale Price")
 
     st.pyplot(fig)
 
@@ -359,7 +360,7 @@ elif menu == "影响因素分析":
             ax=ax
         )
 
-        ax.set_title("面积与单价关系")
+        ax.set_title("Floor Area vs Unit Price")
 
     elif factor == "房龄与价格":
 
@@ -370,7 +371,7 @@ elif menu == "影响因素分析":
             ax=ax
         )
 
-        ax.set_title("房龄与单价关系")
+        ax.set_title("House Age vs Unit Price")
 
     elif factor == "剩余租约与价格":
 
@@ -381,7 +382,7 @@ elif menu == "影响因素分析":
             ax=ax
         )
 
-        ax.set_title("剩余租约与单价关系")
+        ax.set_title("Remaining Lease vs Unit Price")
 
     st.pyplot(fig)
 
@@ -467,7 +468,7 @@ elif menu == "地图可视化":
             layers=[layer],
             initial_view_state=view_state,
             tooltip={
-                "text": "{town}\n平均单价: {unit_price}"
+                "text": "{town}\nAverage Unit Price: {unit_price:.0f}"
             }
         )
 
@@ -543,7 +544,7 @@ elif menu == "地图可视化":
             layers=[layer],
             initial_view_state=view_state,
             tooltip={
-                "text": "{town}\n年份: " + str(selected_year)
+                "text": "{town}\nYear: " + str(selected_year) + "\nPrice: {unit_price:.0f}"
             }
         )
 
@@ -565,9 +566,11 @@ elif menu == "房价预测":
         'remaining_lease_year'
     ]
 
-    X = df[features]
-
-    y = df['resale_price']
+    # 去除空值，防止模型训练报错
+    df_model = df.dropna(subset=features)
+    
+    X = df_model[features]
+    y = df_model['resale_price']
 
     # 训练模型
     X_train, X_test, y_train, y_test = train_test_split(
