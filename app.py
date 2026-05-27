@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 import pydeck as pdk
-import os
+import plotly.express as px
+from math import radians, sin, cos, sqrt, atan2
 
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
@@ -46,10 +47,8 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --------------------------
-# ✅ 修复：云端不支持 SimHei，改用通用字体
-# --------------------------
-plt.rcParams['font.family'] = ['DejaVu Sans']
+# 中文显示
+plt.rcParams['font.sans-serif'] = ['SimHei']
 plt.rcParams['axes.unicode_minus'] = False
 
 # =====================================================
@@ -60,19 +59,17 @@ st.title("新加坡 HDB 组屋转售价格分析与预测系统")
 st.markdown("---")
 
 # =====================================================
-# ✅ 修复：绝对路径读取 CSV，确保云端能找到
+# 读取数据
 # =====================================================
 
 @st.cache_data
 def load_data():
-    # 获取当前文件所在目录
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(current_dir, "hdb_resale_data.csv")
-    
-    df = pd.read_csv(csv_path)
+
+    df = pd.read_csv("hdb_resale_data.csv")
 
     # 时间处理
     df['month'] = pd.to_datetime(df['month'])
+
     df['year'] = df['month'].dt.year
 
     # 房龄
@@ -95,6 +92,68 @@ def load_data():
 df = load_data()
 
 # =====================================================
+# 距离计算函数
+# =====================================================
+
+def haversine(lat1, lon1, lat2, lon2):
+
+    R = 6371
+
+    dlat = radians(lat2 - lat1)
+
+    dlon = radians(lon2 - lon1)
+
+    a = (
+        sin(dlat / 2) ** 2
+        + cos(radians(lat1))
+        * cos(radians(lat2))
+        * sin(dlon / 2) ** 2
+    )
+
+    return R * 2 * atan2(sqrt(a), sqrt(1 - a))
+
+# =====================================================
+# 配套设施数据
+# =====================================================
+
+mrt_data = pd.read_csv("mrt_locations.csv")
+
+school_data = pd.read_csv("school_locations.csv")
+
+# =====================================================
+# 镇区经纬度
+# =====================================================
+
+town_locations = pd.read_csv("town_locations.csv")
+
+df = df.merge(
+    town_locations,
+    on="town",
+    how="left"
+)
+
+# =====================================================
+# MRT 距离计算
+# =====================================================
+
+df["mrt_distance"] = df.apply(
+
+    lambda row: min([
+
+        haversine(
+            row["latitude"],
+            row["longitude"],
+            s["latitude"],
+            s["longitude"]
+        )
+
+        for _, s in mrt_data.iterrows()
+
+    ]),
+
+    axis=1
+)
+# =====================================================
 # 侧边栏
 # =====================================================
 
@@ -104,15 +163,14 @@ menu = st.sidebar.radio(
     "请选择功能",
     [
         "数据概览",
-        "房价趋势分析",
-        "镇区分析",
         "地图可视化",
-        "影响因素分析",
-        "房价预测"
+        "房价影响因素分析",
+        "房价预测",
+        "新加坡住房政策事件冲击分析"
     ]
 )
 # =====================================================
-# 数据概览
+# 板块1数据概览
 # =====================================================
 
 if menu == "数据概览":
@@ -285,345 +343,638 @@ if menu == "数据概览":
             ax=ax
         )
 
-        ax.set_title("Town Average Price")
-        ax.set_ylabel("Average Resale Price")
+        ax.set_title("各镇区平均房价")
+
+        ax.set_ylabel("平均房价")
 
         st.pyplot(fig)
-# =====================================================
-# 房价趋势分析
-# =====================================================
 
-elif menu == "房价趋势分析":
-
-    st.header("房价趋势分析")
-
-    yearly_price = df.groupby('year')['resale_price'].mean()
-
-    fig, ax = plt.subplots(figsize=(10,6))
-
-    yearly_price.plot(marker='o', ax=ax)
-
-    ax.set_title("Yearly Average Price Trend")
-    ax.set_xlabel("Year")
-    ax.set_ylabel("Average Price")
-
-    ax.grid()
-
-    st.pyplot(fig)
 
 # =====================================================
-# 镇区分析
-# =====================================================
-
-elif menu == "镇区分析":
-
-    st.header("镇区均价分析")
-
-    town_price = df.groupby('town')['resale_price'].mean()
-
-    town_price = town_price.sort_values(ascending=False)
-
-    fig, ax = plt.subplots(figsize=(12,6))
-
-    town_price.head(10).plot(kind='bar', ax=ax)
-
-    ax.set_title("Top 10 Towns by Average Price")
-    ax.set_ylabel("Average Resale Price")
-
-    st.pyplot(fig)
-
-# =====================================================
-# 影响因素分析
-# =====================================================
-
-elif menu == "影响因素分析":
-
-    st.header("房价影响因素分析")
-
-    factor = st.selectbox(
-        "选择分析因素",
-        [
-            "面积与价格",
-            "房龄与价格",
-            "剩余租约与价格"
-        ]
-    )
-
-    fig, ax = plt.subplots(figsize=(8,6))
-
-    if factor == "面积与价格":
-
-        sns.scatterplot(
-            x='floor_area_sqm',
-            y='unit_price',
-            data=df,
-            ax=ax
-        )
-
-        ax.set_title("Floor Area vs Unit Price")
-
-    elif factor == "房龄与价格":
-
-        sns.scatterplot(
-            x='house_age',
-            y='unit_price',
-            data=df,
-            ax=ax
-        )
-
-        ax.set_title("House Age vs Unit Price")
-
-    elif factor == "剩余租约与价格":
-
-        sns.scatterplot(
-            x='remaining_lease_year',
-            y='unit_price',
-            data=df,
-            ax=ax
-        )
-
-        ax.set_title("Remaining Lease vs Unit Price")
-
-    st.pyplot(fig)
-
-# =====================================================
-# 地图可视化
+# 模块2：地图可视化
 # =====================================================
 
 elif menu == "地图可视化":
 
-    st.header("地图可视化分析")
+    st.header("🗺️ HDB 房价地图可视化")
 
-    map_type = st.selectbox(
-        "选择地图类型",
-        [
-            "镇区均价地图",
-            "房价热力地图",
-            "房价动态地图"
-        ]
-    )
+    st.markdown("---")
 
     # =================================================
-    # 模拟镇区经纬度
+    # 顶部控制栏
     # =================================================
 
-    town_coords = {
-        "ANG MO KIO": [1.3691, 103.8454],
-        "BEDOK": [1.3236, 103.9273],
-        "BISHAN": [1.3500, 103.8485],
-        "BUKIT BATOK": [1.3496, 103.7528],
-        "BUKIT MERAH": [1.2770, 103.8190],
-        "CHOA CHU KANG": [1.3854, 103.7443],
-        "CLEMENTI": [1.3151, 103.7650],
-        "GEYLANG": [1.3188, 103.8870],
-        "HOUGANG": [1.3612, 103.8863],
-        "JURONG EAST": [1.3329, 103.7436],
-        "JURONG WEST": [1.3404, 103.7060],
-        "KALLANG/WHAMPOA": [1.3106, 103.8660],
-        "PASIR RIS": [1.3735, 103.9493],
-        "PUNGGOL": [1.4043, 103.9020],
-        "QUEENSTOWN": [1.2942, 103.7861],
-        "SENGKANG": [1.3919, 103.8957],
-        "TAMPINES": [1.3496, 103.9568],
-        "TOA PAYOH": [1.3343, 103.8563],
-        "WOODLANDS": [1.4382, 103.7890],
-        "YISHUN": [1.4294, 103.8354]
-    }
+    col1, col2, col3 = st.columns(3)
 
-    # 添加经纬度
-    df['latitude'] = df['town'].map(
-        lambda x: town_coords.get(x, [1.35, 103.82])[0]
-    )
+    # 年份选择
+    with col1:
 
-    df['longitude'] = df['town'].map(
-        lambda x: town_coords.get(x, [1.35, 103.82])[1]
-    )
-
-    # =================================================
-    # 1. 镇区均价地图
-    # =================================================
-
-    if map_type == "镇区均价地图":
-
-        town_avg = df.groupby(
-            ['town', 'latitude', 'longitude']
-        )['unit_price'].mean().reset_index()
-
-        layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=town_avg,
-            get_position='[longitude, latitude]',
-            get_radius='unit_price / 10',
-            get_fill_color='[255, 140, 0, 160]',
-            pickable=True
+        year = st.select_slider(
+            "选择年份",
+            options=sorted(df["year"].unique())
         )
 
-        view_state = pdk.ViewState(
-            latitude=1.3521,
-            longitude=103.8198,
-            zoom=10
-        )
-
-        deck = pdk.Deck(
-            layers=[layer],
-            initial_view_state=view_state,
-            tooltip={
-                "text": "{town}\nAverage Unit Price: {unit_price:.0f}"
-            }
-        )
-
-        st.pydeck_chart(deck)
-
-    # =================================================
-    # 2. 热力地图
-    # =================================================
-
-    elif map_type == "房价热力地图":
+    # 热力图半径
+    with col2:
 
         radius = st.slider(
             "热力图半径",
             20,
             100,
-            50
-        )
-        layer = pdk.Layer(
-            "HeatmapLayer",
-            data=df,
-            get_position='[longitude, latitude]',
-            get_weight='unit_price',
-            radius_pixels=radius
-        )
-        view_state = pdk.ViewState(
-            latitude=1.3521,
-            longitude=103.8198,
-            zoom=10
+            60
         )
 
-        deck = pdk.Deck(
-            layers=[layer],
-            initial_view_state=view_state
+    # 配套设施
+    with col3:
+
+        show_layers = st.multiselect(
+            "叠加显示",
+            ["MRT站点", "学校", "商场"],
+            default=["MRT站点"]
         )
 
-        st.pydeck_chart(deck)
+    st.markdown("---")
 
     # =================================================
-    # 3. 动态地图
+    # 当前年份数据
     # =================================================
 
-    elif map_type == "房价动态地图":
+    year_df = df[df["year"] == year]
 
-        years = sorted(df['year'].unique())
+    # =================================================
+    # 镇区均价聚合
+    # =================================================
 
-        selected_year = st.select_slider(
-            "选择年份",
-            options=years
-        )
+    town_avg = year_df.groupby(
+        ["town", "latitude", "longitude"]
+    )["unit_price"].mean().reset_index()
 
-        year_df = df[df['year'] == selected_year]
+    # =================================================
+    # 全局颜色范围
+    # =================================================
 
-        town_avg = year_df.groupby(
-            ['town', 'latitude', 'longitude']
-        )['unit_price'].mean().reset_index()
+    global_min = df["unit_price"].min()
 
-        layer = pdk.Layer(
-            "ScatterplotLayer",
-            data=town_avg,
-            get_position='[longitude, latitude]',
-            get_radius='unit_price / 10',
-            get_fill_color='[0, 128, 255, 180]',
-            pickable=True
-        )
+    global_max = df["unit_price"].max()
 
-        view_state = pdk.ViewState(
-            latitude=1.3521,
-            longitude=103.8198,
-            zoom=10
-        )
+    # =================================================
+    # 镇区均价散点图层
+    # =================================================
 
-        deck = pdk.Deck(
-            layers=[layer],
-            initial_view_state=view_state,
-            tooltip={
-                "text": "{town}\nYear: " + str(selected_year) + "\nPrice: {unit_price:.0f}"
-            }
-        )
+    scatter_layer = pdk.Layer(
+        "ScatterplotLayer",
 
-        st.pydeck_chart(deck)
+        data=town_avg,
 
+        get_position=["longitude", "latitude"],
 
-# =====================================================
-# 房价预测
-# =====================================================
+        get_radius="unit_price * 0.4",
 
-elif menu == "房价预测":
+        get_fill_color=[
+            255,
+            140,
+            0,
+            180
+        ],
 
-    st.header("HDB 房价预测")
+        pickable=True,
 
-    # 特征
-    features = [
-        'floor_area_sqm',
-        'house_age',
-        'remaining_lease_year'
+        auto_highlight=True
+    )
+
+    # =================================================
+    # 热力图层
+    # =================================================
+
+    heatmap_layer = pdk.Layer(
+        "HeatmapLayer",
+
+        data=town_avg,
+
+        get_position=["longitude", "latitude"],
+
+        get_weight="unit_price",
+
+        radius_pixels=radius
+    )
+
+    # =================================================
+    # 读取 MRT 数据
+    # =================================================
+
+    mrt_data = pd.read_csv(
+        "mrt_locations.csv"
+    )
+
+    mrt_layer = pdk.Layer(
+        "ScatterplotLayer",
+
+        data=mrt_data,
+
+        get_position=["longitude", "latitude"],
+
+        get_fill_color=[0, 128, 255],
+
+        get_radius=120,
+
+        pickable=True
+    )
+
+    # =================================================
+    # 读取学校数据
+    # =================================================
+
+    school_data = pd.read_csv(
+        "school_locations.csv"
+    )
+
+    school_layer = pdk.Layer(
+        "ScatterplotLayer",
+
+        data=school_data,
+
+        get_position=["longitude", "latitude"],
+
+        get_fill_color=[255, 0, 0],
+
+        get_radius=120,
+
+        pickable=True
+    )
+
+    # =================================================
+    # 读取商场数据
+    # =================================================
+
+    mall_data = pd.read_csv(
+        "mall_locations.csv"
+    )
+
+    mall_layer = pdk.Layer(
+        "ScatterplotLayer",
+
+        data=mall_data,
+        get_position=["longitude", "latitude"],
+        get_fill_color=[0, 200, 100],
+        get_radius=120,
+        pickable=True
+    )
+
+    # =================================================
+    # 图层组合
+    # =================================================
+
+    layers = [
+        heatmap_layer,
+        scatter_layer
     ]
 
-    # 去除空值，防止模型训练报错
-    df_model = df.dropna(subset=features)
-    
-    X = df_model[features]
-    y = df_model['resale_price']
+    if "MRT站点" in show_layers:
 
-    # 训练模型
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=0.2,
-        random_state=42
+        layers.append(mrt_layer)
+
+    if "学校" in show_layers:
+
+        layers.append(school_layer)
+
+    if "商场" in show_layers:
+
+        layers.append(mall_layer)
+
+    # =================================================
+    # 地图视角
+    # =================================================
+
+    view = pdk.ViewState(
+        latitude=1.3521,
+        longitude=103.8198,
+        zoom=11,
+        pitch=40
     )
 
-    model = RandomForestRegressor(
-        n_estimators=100,
-        random_state=42
+    # =================================================
+    # 地图对象
+    # =================================================
+
+    deck = pdk.Deck(
+
+        map_style="mapbox://styles/mapbox/light-v9",
+
+        initial_view_state=view,
+
+        layers=layers,
+
+        tooltip={
+            "html": """
+            <b>镇区:</b> {town}<br/>
+            <b>平均单价:</b> {unit_price} 元/㎡
+            """,
+
+            "style": {
+                "backgroundColor": "white",
+                "color": "black"
+            }
+        }
     )
 
-    model.fit(X_train, y_train)
+    # =================================================
+    # 显示地图
+    # =================================================
 
-    y_pred = model.predict(X_test)
-
-    score = r2_score(y_test, y_pred)
-
-    st.success(f"模型 R² 得分：{score:.4f}")
-
-    st.subheader("请输入房屋信息")
-
-    area = st.slider(
-        "房屋面积（平方米）",
-        30,
-        200,
-        90
+    st.pydeck_chart(
+        deck,
+        use_container_width=True
     )
 
-    age = st.slider(
-        "房龄",
-        1,
-        60,
-        20
+    # =================================================
+    # 底部统计
+    # =================================================
+
+    st.markdown("---")
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "当前年份",
+        year
     )
 
-    lease = st.slider(
-        "剩余租约",
-        1,
-        99,
-        75
+    c2.metric(
+        "平均单价",
+        f"S${town_avg['unit_price'].mean():.0f}"
     )
 
-    if st.button("开始预测"):
+    c3.metric(
+        "最高单价",
+        f"S${town_avg['unit_price'].max():.0f}"
+    )
 
-        sample = [[area, age, lease]]
+# =====================================================
+# 模块3：房价影响因素分析
+# =====================================================
 
-        result = model.predict(sample)
+elif menu == "房价影响因素分析":
 
-        st.balloons()
+    st.header("📊 房价影响因素分析")
 
-        st.success(
-            f"预测房价：S${result[0]:,.0f}"
+    st.markdown("---")
+
+    # =================================================
+    # 房龄
+    # =================================================
+
+    current_year = 2026
+
+    df["house_age"] = (
+        current_year - df["lease_commence_date"]
+    )
+
+    # =================================================
+    # 楼层分类
+    # =================================================
+
+    def floor_category(x):
+
+        if "01 TO 03" in x:
+            return "低楼层"
+
+        elif "04 TO 06" in x:
+            return "中楼层"
+
+        else:
+            return "高楼层"
+
+    df["floor_category"] = df[
+        "storey_range"
+    ].apply(floor_category)
+
+    # =================================================
+    # 影响因素 Tabs
+    # =================================================
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "面积分析",
+        "房型分析",
+        "楼层分析",
+        "租约分析",
+        "房龄分析"
+    ])
+
+    # =================================================
+    # 面积 vs 单价
+    # =================================================
+
+    with tab1:
+
+        st.subheader("面积 vs 单价")
+
+        fig = px.scatter(
+            df.sample(3000),
+
+            x="floor_area_sqm",
+
+            y="unit_price",
+
+            trendline="ols",
+
+            title="面积与单价关系",
+
+            opacity=0.5
         )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    # =================================================
+    # 房型 vs 均价
+    # =================================================
+
+    with tab2:
+
+        st.subheader("房型 vs 均价")
+
+        flat_avg = df.groupby(
+            "flat_type"
+        )["resale_price"].mean().reset_index()
+
+        fig = px.bar(
+            flat_avg,
+
+            x="flat_type",
+
+            y="resale_price",
+
+            title="不同房型均价对比"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    # =================================================
+    # 楼层分析
+    # =================================================
+
+    with tab3:
+
+        st.subheader("楼层 vs 均价")
+
+        fig = px.box(
+            df,
+
+            x="floor_category",
+
+            y="unit_price",
+
+            title="楼层与单价关系"
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    # =================================================
+    # 剩余租约分析
+    # =================================================
+
+    with tab4:
+
+        st.subheader("剩余租约 vs 单价")
+
+        df["lease_years"] = df[
+            "remaining_lease"
+        ].str.extract(r"(\d+)").astype(float)
+
+        fig = px.scatter(
+            df.sample(3000),
+
+            x="lease_years",
+
+            y="unit_price",
+
+            trendline="ols",
+
+            title="剩余租约与单价关系",
+
+            opacity=0.5
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    # =================================================
+    # 房龄分析
+    # =================================================
+
+    with tab5:
+
+        st.subheader("房龄 vs 单价")
+
+        fig = px.scatter(
+            df.sample(3000),
+
+            x="house_age",
+
+            y="unit_price",
+
+            trendline="ols",
+
+            title="房龄与单价关系",
+
+            opacity=0.5
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+    st.markdown("---")
+
+    # =================================================
+    # 成熟区 vs 非成熟区
+    # =================================================
+
+    st.subheader("🏘️ 成熟区 vs 非成熟区分析")
+
+    mature_towns = [
+        "QUEENSTOWN",
+        "TOA PAYOH",
+        "ANG MO KIO",
+        "BEDOK"
+    ]
+
+    df["town_type"] = df["town"].apply(
+        lambda x:
+        "成熟区"
+        if x in mature_towns
+        else "非成熟区"
+    )
+
+    with st.expander("查看成熟区定义"):
+
+        st.write("""
+        成熟组屋区：
+        Queenstown、Toa Payoh、Ang Mo Kio、Bedok 等。
+
+        非成熟区：
+        Punggol、Sengkang 等新兴发展区域。
+        """)
+
+    town_compare = df.groupby(
+        "town_type"
+    )["resale_price"].mean().reset_index()
+
+    fig = px.bar(
+        town_compare,
+
+        x="town_type",
+
+        y="resale_price",
+
+        color="town_type",
+
+        title="成熟区 vs 非成熟区均价"
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+    st.markdown("---")
+
+    # =================================================
+    # MRT 距离分析
+    # =================================================
+
+    st.subheader("🚇 MRT距离对房价影响")
+
+    fig = px.scatter(
+        df.sample(3000),
+
+        x="mrt_distance",
+
+        y="unit_price",
+
+        trendline="ols",
+
+        title="MRT距离 vs 单价",
+
+        opacity=0.5
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
+
+    # =================================================
+    # MRT距离价格对比
+    # =================================================
+
+    near_mrt = df[
+        df["mrt_distance"] < 0.5
+    ]["unit_price"].mean()
+
+    far_mrt = df[
+        df["mrt_distance"] > 1
+    ]["unit_price"].mean()
+
+    c1, c2 = st.columns(2)
+
+    c1.metric(
+        "距离 MRT < 500m",
+        f"S${near_mrt:.0f}/㎡"
+    )
+
+    c2.metric(
+        "距离 MRT > 1km",
+        f"S${far_mrt:.0f}/㎡"
+    )
+
+    st.markdown("---")
+
+    # =================================================
+    # 购房策略分析
+    # =================================================
+
+    st.subheader("📈 购房策略与保值分析")
+
+    st.write("""
+    策略：
+    选择成熟区 + MRT 500m内 + 4 ROOM + 总价低于 600000 新币。
+    """)
+
+    strategy_df = df[
+
+        (df["town_type"] == "成熟区") &
+
+        (df["mrt_distance"] < 0.5) &
+
+        (df["flat_type"] == "4 ROOM") &
+
+        (df["resale_price"] < 600000)
+
+    ]
+
+    baseline_df = df[
+
+        (df["flat_type"] == "4 ROOM")
+
+    ]
+
+    c1, c2, c3 = st.columns(3)
+
+    c1.metric(
+        "策略组均价",
+        f"S${strategy_df['resale_price'].mean():.0f}"
+    )
+
+    c2.metric(
+        "基准组均价",
+        f"S${baseline_df['resale_price'].mean():.0f}"
+    )
+
+    c3.metric(
+        "策略组成交量",
+        len(strategy_df)
+    )
+
+    # 趋势图
+    strategy_trend = strategy_df.groupby(
+        "year"
+    )["resale_price"].mean().reset_index()
+
+    baseline_trend = baseline_df.groupby(
+        "year"
+    )["resale_price"].mean().reset_index()
+
+    fig = px.line(
+        title="策略组 vs 基准组价格走势"
+    )
+
+    fig.add_scatter(
+        x=strategy_trend["year"],
+        y=strategy_trend["resale_price"],
+        mode="lines+markers",
+        name="策略组"
+    )
+
+    fig.add_scatter(
+        x=baseline_trend["year"],
+        y=baseline_trend["resale_price"],
+        mode="lines+markers",
+        name="基准组"
+    )
+
+    st.plotly_chart(
+        fig,
+        use_container_width=True
+    )
