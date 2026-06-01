@@ -106,10 +106,14 @@ BASE_FEATURES = [
     "storey_mid",           # 楼层中位数
     "flat_type_code",       # 房型编码
     "is_mature",            # 是否成熟区
+    "is_high_floor",        # 是否高楼层 (>=15)
+    "is_low_floor",         # 是否低楼层 (<=3)
     "near_mrt",             # 是否接近MRT
     "mrt_distance_km",      # 到MRT距离
     "near_school",          # 是否接近学校
     "year_feat",            # 成交年份特征
+    "area_per_room",        # 每房面积（面积/房型）
+    "age_lease_interact",   # 房龄×已消耗租约交互
 ]
 
 

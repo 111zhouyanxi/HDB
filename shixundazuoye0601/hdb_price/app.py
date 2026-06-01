@@ -50,6 +50,7 @@ from utils.model import (
     train_model, evaluate_model, evaluate_by_category,
     get_feature_importance, predict_price, find_prediction_errors,
     prepare_model_data, MODEL_CONFIGS,
+    cross_validate_model, train_all_models,
 )
 from utils.analysis import (
     analyze_town_price_trend, analyze_preservation_value,
@@ -488,7 +489,7 @@ with tab3:
             analysis_df,
             x="floor_area_sqm", y="unit_price",
             color="flat_type",
-            trendline="lowess",
+
             title="建筑面积与单价关系（按房型着色）",
             labels={
                 "floor_area_sqm": "建筑面积（㎡）",
@@ -557,7 +558,7 @@ with tab3:
             analysis_df,
             x="remaining_years", y="unit_price",
             color="flat_type",
-            trendline="lowess",
+
             title="剩余租约年限与单价关系",
             labels={
                 "remaining_years": "剩余租约（年）",
@@ -579,7 +580,6 @@ with tab3:
         analysis_df,
         x="flat_age", y="unit_price",
         color="is_mature" if "is_mature" in analysis_df.columns else None,
-        trendline="lowess",
         title="房龄与单价关系",
         labels={
             "flat_age": "房龄（年）",
@@ -667,7 +667,7 @@ with tab3:
                     "mrt_distance": "到最近 MRT 距离（km）",
                     "unit_price": "单价（S$/㎡）",
                 },
-                trendline="lowess",
+    
                 opacity=0.6,
             )
             st.plotly_chart(fig, use_container_width=True)
@@ -718,7 +718,7 @@ with tab4:
         feature_cols = get_feature_columns(all_features_df, include_town_dummies=True)
         train_df, test_df = prepare_model_data(all_features_df)
 
-        # 训练模型
+        # 训练模型 + 交叉验证
         model, X_train, y_train, used_features = train_model(
             all_features_df[all_features_df["year"] <= 2023],
             feature_cols,
@@ -726,23 +726,65 @@ with tab4:
             **model_kwargs,
         )
 
-        # 评估模型
+        cv_results = cross_validate_model(
+            all_features_df, feature_cols,
+            model_name=selected_model_name, n_splits=3,
+            **model_kwargs,
+        )
+
+        # 评估模型（测试集）
         X_test_df = test_df[used_features].dropna()
         test_idx = X_test_df.index
         y_test = test_df.loc[test_idx, "unit_price"]
         eval_results = evaluate_model(model, X_test_df, y_test)
 
+        # 检查是否使用了 StandardScaler
+        config = MODEL_CONFIGS[selected_model_name]
+        using_scaler = config["need_scaler"]
+
+    # ---- 模型配置提示 ----
+    if using_scaler:
+        st.info(f"🔧 **{config['label']}** 已自动启用 **StandardScaler** 特征标准化（线性模型需要统一量纲）")
+    else:
+        st.info(f"🌲 **{config['label']}** 为树模型，无需特征标准化")
+
     # ---- 整体评估指标 ----
-    st.subheader("📊 模型整体评估")
+    st.subheader("📊 测试集评估（2024+）")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("MAE（平均绝对误差）", f"S${eval_results['MAE']:,.0f}/㎡" if not np.isnan(eval_results['MAE']) else "N/A")
+        st.metric("MAE", f"S${eval_results['MAE']:,.0f}/㎡" if not np.isnan(eval_results['MAE']) else "N/A",
+                  help="平均绝对误差，越小越好")
     with col2:
-        st.metric("RMSE（均方根误差）", f"S${eval_results['RMSE']:,.0f}/㎡" if not np.isnan(eval_results['RMSE']) else "N/A")
+        st.metric("RMSE", f"S${eval_results['RMSE']:,.0f}/㎡" if not np.isnan(eval_results['RMSE']) else "N/A",
+                  help="均方根误差，对大误差惩罚更大")
     with col3:
-        st.metric("R²（决定系数）", f"{eval_results['R2']:.3f}" if not np.isnan(eval_results['R2']) else "N/A")
+        st.metric("R²", f"{eval_results['R2']:.3f}" if not np.isnan(eval_results['R2']) else "N/A",
+                  help="决定系数，越接近1越好")
     with col4:
-        st.metric("MAPE（平均百分比误差）", f"{eval_results['MAPE']:.1f}%" if not np.isnan(eval_results.get('MAPE', np.nan)) else "N/A")
+        st.metric("MAPE", f"{eval_results['MAPE']:.1f}%" if not np.isnan(eval_results.get('MAPE', np.nan)) else "N/A",
+                  help="平均百分比误差")
+
+    # ---- 交叉验证结果 ----
+    st.subheader("🔄 时序交叉验证（TimeSeriesSplit）")
+    st.caption("按年份顺序切分 3 折，考察模型在不同时间段上的稳定性")
+
+    if len(cv_results["fold_details"]) > 0:
+        cv_col1, cv_col2, cv_col3, cv_col4 = st.columns(4)
+        with cv_col1:
+            st.metric("CV-R² 均值", f"{cv_results['mean_r2']:.4f}" if not np.isnan(cv_results['mean_r2']) else "N/A")
+        with cv_col2:
+            st.metric("CV-R² 标准差", f"{cv_results['std_r2']:.4f}" if not np.isnan(cv_results['std_r2']) else "N/A",
+                      help="越小说明模型越稳定")
+        with cv_col3:
+            st.metric("CV-MAE 均值", f"S${cv_results['mean_mae']:,.0f}" if not np.isnan(cv_results['mean_mae']) else "N/A")
+        with cv_col4:
+            st.metric("CV-MAE 标准差", f"S${cv_results['std_mae']:,.0f}" if not np.isnan(cv_results['std_mae']) else "N/A")
+
+        # 折详情
+        with st.expander("📋 各折详情"):
+            st.dataframe(pd.DataFrame(cv_results["fold_details"]), use_container_width=True)
+    else:
+        st.warning("数据不足以进行交叉验证（年份太少）")
 
     # ---- 预测值 vs 实际值散点图 ----
     st.subheader("📈 预测值 vs 实际值")
@@ -855,11 +897,12 @@ with tab4:
     st.markdown("---")
     st.subheader("📊 特征重要性排名")
 
-    importance_df = get_feature_importance(model, used_features)
+    importance_df, imp_type = get_feature_importance(model, used_features)
     if len(importance_df) > 0:
         top_n = min(15, len(importance_df))
         top_features = importance_df.head(top_n)
 
+        st.caption(f"重要性类型: {imp_type}")
         fig = px.bar(
             top_features,
             x="重要性", y="特征",
@@ -1256,7 +1299,7 @@ with tab7:
         monthly_avg = df.groupby(df["month_dt"].dt.to_period("M"))["unit_price"].agg(
             ["mean", "count"]
         ).reset_index()
-        monthly_avg["month_dt"] = monthly_avg["month_dt"].astype(str)
+        monthly_avg["month_dt"] = monthly_avg["month_dt"].dt.to_timestamp()
 
         fig = go.Figure()
         fig.add_trace(go.Scatter(
@@ -1267,17 +1310,25 @@ with tab7:
             line=dict(color="steelblue", width=2),
         ))
 
-        # 添加事件竖线
-        for _, event in events.iterrows():
-            event_date = event["date"]
-            event_str = event_date.strftime("%Y-%m")
-            fig.add_vline(
-                x=event_str,
-                line_dash="dash",
-                line_color="red",
+        # 添加事件竖线 (使用 add_shape 避免 pandas Timestamp 兼容性问题)
+        y_max = monthly_avg["mean"].max()
+        y_min = monthly_avg["mean"].min()
+        for i, (_, event) in enumerate(events.iterrows()):
+            event_date = pd.to_datetime(event["date"])
+            event_str = event_date.strftime("%Y-%m-%d")
+            fig.add_shape(
+                type="line",
+                x0=event_str, x1=event_str,
+                y0=y_min, y1=y_max,
+                line=dict(dash="dash", color="red", width=1),
                 opacity=0.5,
-                annotation_text=event["event"][:20],
-                annotation_position="top",
+            )
+            fig.add_annotation(
+                x=event_str, y=y_max,
+                text=event["event"][:20],
+                showarrow=False,
+                yshift=10 + (i % 3) * 15,
+                font=dict(size=9, color="red"),
             )
 
         fig.update_layout(
