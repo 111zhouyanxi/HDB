@@ -1075,4 +1075,4 @@ with tab4:
     if submitted:
         # 构建输入特征
         flat_type_map = {
-            "2 ROOM": 2, "3 ROOM": 3, "4 ROOM": 4,
+            "2 ROOM": 2, "3 ROOM": 3, "4 ROOM": 4,}
