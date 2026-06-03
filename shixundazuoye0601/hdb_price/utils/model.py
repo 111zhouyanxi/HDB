@@ -86,7 +86,7 @@ PARAM_GRIDS = {
         "estimator__n_estimators": [100, 200],
         "estimator__max_depth": [4, 6, 8],
         "estimator__learning_rate": [0.03, 0.05, 0.1],
-    }
+    },
 }
 
 
