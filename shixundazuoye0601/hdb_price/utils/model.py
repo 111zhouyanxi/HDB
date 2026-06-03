@@ -1,11 +1,13 @@
 """
 模型训练与预测模块
-负责房价预测模型的训练、评估、对比和价格预估
 
-优化内容:
-- StandardScaler: 线性模型自动标准化特征
-- TimeSeriesSplit: 时序交叉验证，评估模型稳定性
-- 多模型对比: 一键训练所有模型并横向对比
+优化要点:
+- StandardScaler: 线性模型自动标准化
+- TimeSeriesSplit CV: 时序交叉验证
+- Log 变换: 对右偏的单价做 log1p 变换，残差更接近正态分布
+- XGBoost: 通常比 GradientBoosting 精度更高
+- GridSearchCV: 自动搜索最优超参数
+- 集成预测: 多个模型加权平均
 """
 import pandas as pd
 import numpy as np
@@ -13,195 +15,188 @@ from sklearn.linear_model import LinearRegression, Ridge
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import warnings
 warnings.filterwarnings("ignore")
 
+# 尝试导入 XGBoost
+try:
+    from xgboost import XGBRegressor
+    HAS_XGBOOST = True
+except ImportError:
+    HAS_XGBOOST = False
+
 
 # ========== 模型配置 ==========
-# need_scaler=True 表示该模型需要特征标准化
 MODEL_CONFIGS = {
     "LinearRegression": {
         "class": LinearRegression,
         "label": "线性回归",
         "params": {},
         "need_scaler": True,
-        "description": "最简单的线性模型，可解释性强",
+        "description": "基准线性模型",
     },
     "Ridge": {
         "class": Ridge,
         "label": "岭回归",
-        "params": {"alpha": 1.0},
+        "params": {"alpha": 10.0},
         "need_scaler": True,
-        "description": "带 L2 正则化的线性模型，防止过拟合",
+        "description": "L2 正则化，防过拟合",
     },
     "RandomForest": {
         "class": RandomForestRegressor,
         "label": "随机森林",
-        "params": {"n_estimators": 100, "max_depth": 10, "random_state": 42, "n_jobs": -1},
+        "params": {"n_estimators": 200, "max_depth": 15, "min_samples_leaf": 5,
+                   "random_state": 42, "n_jobs": -1},
         "need_scaler": False,
-        "description": "集成多棵决策树，捕捉非线性关系",
+        "description": "集成决策树，非线性",
     },
     "GradientBoosting": {
         "class": GradientBoostingRegressor,
-        "label": "梯度提升树",
-        "params": {"n_estimators": 100, "max_depth": 5,
-                   "learning_rate": 0.1, "random_state": 42},
+        "label": "梯度提升",
+        "params": {"n_estimators": 200, "max_depth": 6, "min_samples_leaf": 5,
+                   "learning_rate": 0.05, "subsample": 0.8, "random_state": 42},
         "need_scaler": False,
-        "description": "逐步优化残差，预测精度高",
+        "description": "逐步优化残差",
+    },
+}
+
+# XGBoost 如果可用
+if HAS_XGBOOST:
+    MODEL_CONFIGS["XGBoost"] = {
+        "class": XGBRegressor,
+        "label": "XGBoost",
+        "params": {"n_estimators": 200, "max_depth": 6, "learning_rate": 0.05,
+                   "subsample": 0.8, "colsample_bytree": 0.8,
+                   "random_state": 42, "n_jobs": -1},
+        "need_scaler": False,
+        "description": "梯度提升最优实现",
+    }
+
+# 简化的超参数网格（用于 GridSearchCV）
+PARAM_GRIDS = {
+    "Ridge": {"estimator__alpha": [0.1, 1.0, 10.0, 50.0]},
+    "RandomForest": {
+        "estimator__n_estimators": [100, 200],
+        "estimator__max_depth": [10, 15, 20],
+        "estimator__min_samples_leaf": [3, 5],
+    },
+    "GradientBoosting": {
+        "estimator__n_estimators": [100, 200],
+        "estimator__max_depth": [4, 6, 8],
+        "estimator__learning_rate": [0.03, 0.05, 0.1],
     },
 }
 
 
-# ========== 核心训练函数 ==========
+def _build_estimator(model_name, params, available_features=None):
+    """构建 estimator 或 Pipeline"""
+    config = MODEL_CONFIGS[model_name]
+    if config["need_scaler"]:
+        pipe = Pipeline([
+            ("scaler", StandardScaler()),
+            ("estimator", config["class"](**params)),
+        ])
+        return pipe
+    else:
+        return config["class"](**params)
 
-def train_model(df, features, model_name="RandomForest", **kwargs):
+
+# ========== 核心函数 ==========
+
+def train_model(df, features, model_name="GradientBoosting",
+                use_log_target=True, **kwargs):
     """
-    训练单个预测模型（线性模型自动带 StandardScaler Pipeline）
+    训练单个模型
 
     Args:
-        df: 包含特征和目标的数据
-        features: 特征列名列表
+        df: 训练数据
+        features: 特征列名
         model_name: 模型名称
-        **kwargs: 模型超参数
+        use_log_target: 是否对 y 做 log1p 变换（推荐，因为房价右偏）
+        **kwargs: 覆盖默认超参数
 
     Returns:
-        tuple: (model_or_pipeline, X_train, y_train, feature_names)
+        (model, X_train, y_train_raw, feature_names, log_used)
     """
-    config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["RandomForest"])
-
-    # 构建参数
+    config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["GradientBoosting"])
     params = config["params"].copy()
     params.update(kwargs)
 
-    # 准备数据
     train_data = df.dropna(subset=features + ["unit_price"])
     available_features = [f for f in features if f in train_data.columns]
 
     X_train = train_data[available_features]
-    y_train = train_data["unit_price"]
+    y_train_raw = train_data["unit_price"].values
 
-    # 线性模型 → 用 Pipeline(StandardScaler + Model)
-    if config["need_scaler"]:
-        model = Pipeline([
-            ("scaler", StandardScaler()),
-            ("estimator", config["class"](**params)),
-        ])
-        model.fit(X_train, y_train)
-        # StandardScaler 会将 DataFrame 转为 numpy array，导致 feature_names_in_ 丢失
-        # 手动注入特征名到内部 estimator
-        model.named_steps["estimator"].feature_names_in_ = np.array(available_features)
+    if use_log_target:
+        y_train = np.log1p(y_train_raw)
     else:
-        model = config["class"](**params)
-        model.fit(X_train, y_train)
+        y_train = y_train_raw
 
-    return model, X_train, y_train, available_features
+    model = _build_estimator(model_name, params, available_features)
+    model.fit(X_train, y_train)
 
-
-def evaluate_model(model, X_test, y_test):
-    """
-    评估模型表现（自动处理 Pipeline 和特征对齐）
-
-    Args:
-        model: 已训练的模型（或 Pipeline）
-        X_test: 测试特征
-        y_test: 测试目标
-
-    Returns:
-        dict: 包含 MAE, RMSE, R², MAPE 等指标
-    """
-    # 获取模型需要的特征名
-    final_estimator = model
+    # 注入特征名
     if isinstance(model, Pipeline):
-        final_estimator = model.named_steps["estimator"]
+        model.named_steps["estimator"].feature_names_in_ = np.array(available_features)
 
-    if hasattr(final_estimator, "feature_names_in_"):
-        required_features = list(final_estimator.feature_names_in_)
-        # 确保所有必需特征都存在
-        missing = [f for f in required_features if f not in X_test.columns]
-        if missing:
-            for f in missing:
-                X_test = X_test.copy()
-                X_test[f] = 0
-        X_test = X_test[required_features].copy()
+    return model, X_train, y_train_raw, available_features, use_log_target
+
+
+def evaluate_model(model, X_test, y_test_raw, use_log_target=True):
+    """评估模型"""
+    final_est = model.named_steps["estimator"] if isinstance(model, Pipeline) else model
+
+    if hasattr(final_est, "feature_names_in_"):
+        required = list(final_est.feature_names_in_)
     else:
-        X_test = X_test.dropna()
+        required = [c for c in X_test.columns if not c.startswith("_")]
 
-    X_test = X_test.dropna()
+    # 用 numpy 数组避免列名/顺序问题
+    X_test = X_test.loc[:, ~X_test.columns.duplicated()]  # 去重
+    X_sub = X_test[[c for c in required if c in X_test.columns]]
+    X_arr = X_sub.fillna(0).values.astype(np.float64)
 
-    # 使用非 NaN 的行
-    valid_idx = X_test.index.intersection(y_test.dropna().index)
-    X_test = X_test.loc[valid_idx]
-    y_test = y_test.loc[valid_idx]
+    y_vals = y_test_raw.values.astype(np.float64)
+    mask = ~np.isnan(y_vals)
+    X_arr, y_true = X_arr[mask], y_vals[mask]
 
-    if len(X_test) == 0:
-        return {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan,
-                "MAPE": np.nan, "n_samples": 0}
+    if len(X_arr) == 0:
+        return {"MAE": np.nan, "RMSE": np.nan, "R2": np.nan, "MAPE": np.nan}
 
-    y_pred = model.predict(X_test)
+    y_pred_t = model.predict(X_arr)
+    y_pred = np.expm1(np.clip(y_pred_t, -50, 50)) if use_log_target else np.clip(y_pred_t, 0, None)
 
-    mae = mean_absolute_error(y_test, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-    r2 = r2_score(y_test, y_pred)
+    mae = mean_absolute_error(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    r2 = r2_score(y_true, y_pred)
+    mape = np.mean(np.abs((y_true - y_pred) / np.clip(y_true, 1, None))) * 100
 
-    # MAPE (Mean Absolute Percentage Error)
-    mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
-
-    return {
-        "MAE": mae,
-        "RMSE": rmse,
-        "R2": r2,
-        "MAPE": mape,
-        "y_test": y_test,
-        "y_pred": y_pred,
-        "n_samples": len(X_test),
-    }
+    return {"MAE": mae, "RMSE": rmse, "R2": r2, "MAPE": mape,
+            "y_test": pd.Series(y_true), "y_pred": y_pred, "n_samples": len(y_true)}
 
 
-def cross_validate_model(df, features, model_name="RandomForest",
-                         n_splits=3, **kwargs):
-    """
-    使用时序交叉验证评估模型稳定性
-
-    按年份顺序切分，每次用前 N 年训练，后 1 年验证。
-    例如 n_splits=3 时:
-      Fold 1: train=2020-2021, val=2022
-      Fold 2: train=2020-2022, val=2023
-      Fold 3: train=2020-2023, val=2024
-
-    Args:
-        df: 包含特征和目标的数据（需有 year 列）
-        features: 特征列名列表
-        model_name: 模型名称
-        n_splits: 切分折数
-        **kwargs: 模型超参数
-
-    Returns:
-        dict: {mean_r2, std_r2, mean_mae, std_mae, scores, fold_details}
-    """
-    config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["RandomForest"])
+def cross_validate_model(df, features, model_name="GradientBoosting",
+                         n_splits=3, use_log_target=True, **kwargs):
+    """时序交叉验证"""
+    config = MODEL_CONFIGS.get(model_name, MODEL_CONFIGS["GradientBoosting"])
     params = config["params"].copy()
     params.update(kwargs)
 
-    # 准备数据
     data = df.dropna(subset=features + ["unit_price", "year"]).copy()
     available_features = [f for f in features if f in data.columns]
-
-    # 按年份排序
     data = data.sort_values("year")
     years = sorted(data["year"].unique())
 
     if len(years) < n_splits + 1:
-        # 年份不够，减少折数
         n_splits = max(1, len(years) - 1)
 
-    r2_scores = []
-    mae_scores = []
+    r2_scores, mae_scores = [], []
     fold_details = []
 
     for fold in range(n_splits):
-        # 训练年份：从最早到倒数第 (n_splits - fold) 年
         split_idx = len(years) - n_splits + fold
         train_years = years[:split_idx]
         val_year = years[split_idx]
@@ -210,234 +205,190 @@ def cross_validate_model(df, features, model_name="RandomForest",
         val_mask = data["year"] == val_year
 
         X_tr = data.loc[train_mask, available_features]
-        y_tr = data.loc[train_mask, "unit_price"]
+        y_tr = data.loc[train_mask, "unit_price"].values
         X_val = data.loc[val_mask, available_features]
-        y_val = data.loc[val_mask, "unit_price"]
+        y_val = data.loc[val_mask, "unit_price"].values
 
         if len(X_tr) < 50 or len(X_val) < 10:
             continue
 
-        # 训练
-        if config["need_scaler"]:
-            model = Pipeline([
-                ("scaler", StandardScaler()),
-                ("estimator", config["class"](**params)),
-            ])
-            model.fit(X_tr, y_tr)
-            model.named_steps["estimator"].feature_names_in_ = np.array(available_features)
+        if use_log_target:
+            y_tr_t = np.log1p(y_tr)
         else:
-            model = config["class"](**params)
-            model.fit(X_tr, y_tr)
+            y_tr_t = y_tr
 
-        # 评估
-        y_pred = model.predict(X_val)
+        model = _build_estimator(model_name, params, available_features)
+        model.fit(X_tr, y_tr_t)
+        if isinstance(model, Pipeline):
+            model.named_steps["estimator"].feature_names_in_ = np.array(available_features)
+
+        y_pred_t = model.predict(X_val)
+        y_pred = np.expm1(y_pred_t) if use_log_target else y_pred_t
+        y_pred = np.clip(y_pred, 0, None)
+
         r2 = r2_score(y_val, y_pred)
         mae = mean_absolute_error(y_val, y_pred)
-
         r2_scores.append(r2)
         mae_scores.append(mae)
         fold_details.append({
             "fold": fold + 1,
             "train_years": f"{train_years[0]}-{train_years[-1]}",
             "val_year": val_year,
-            "train_size": len(X_tr),
-            "val_size": len(X_val),
-            "R²": round(r2, 4),
-            "MAE": round(mae, 1),
+            "train_size": len(X_tr), "val_size": len(X_val),
+            "R²": round(r2, 4), "MAE": round(mae, 1),
         })
 
-    if len(r2_scores) == 0:
-        return {
-            "mean_r2": np.nan, "std_r2": np.nan,
-            "mean_mae": np.nan, "std_mae": np.nan,
-            "scores": [], "fold_details": [],
-        }
+    if not r2_scores:
+        return {"mean_r2": np.nan, "std_r2": np.nan, "mean_mae": np.nan,
+                "std_mae": np.nan, "fold_details": []}
 
     return {
-        "mean_r2": np.mean(r2_scores),
-        "std_r2": np.std(r2_scores),
-        "mean_mae": np.mean(mae_scores),
-        "std_mae": np.std(mae_scores),
-        "r2_scores": r2_scores,
-        "mae_scores": mae_scores,
+        "mean_r2": np.mean(r2_scores), "std_r2": np.std(r2_scores),
+        "mean_mae": np.mean(mae_scores), "std_mae": np.std(mae_scores),
         "fold_details": fold_details,
     }
 
 
-def train_all_models(df, features, **kwargs):
-    """
-    一键训练所有模型并返回横向对比结果
-
-    Args:
-        df: 训练数据（2020-2023）
-        features: 特征列名列表
-        **kwargs: 可覆盖默认超参数
-
-    Returns:
-        dict: {
-            models: {name: trained_model},
-            train_scores: DataFrame (单次拟合的指标对比),
-            cv_scores: DataFrame (交叉验证的指标对比),
-        }
-    """
-    models = {}
-    train_results = []
-    cv_results = []
-
+def train_all_models(df, features, use_log_target=True, **kwargs):
+    """一键训练全部模型"""
+    models, train_info, cv_info = {}, [], []
     for name, config in MODEL_CONFIGS.items():
-        # 训练模型
-        model, X_tr, y_tr, feats = train_model(df, features, name, **kwargs)
+        model, X_tr, y_tr, feats, log_used = train_model(
+            df, features, name, use_log_target=use_log_target, **kwargs)
         models[name] = model
-
-        # 在训练集上的交叉验证
-        cv = cross_validate_model(df, features, name, n_splits=3, **kwargs)
-
-        train_results.append({
-            "模型": config["label"],
-            "模型名称": name,
-            "需要标准化": "是" if config["need_scaler"] else "否",
-            "描述": config["description"],
+        train_info.append({
+            "模型": config["label"], "Scaler": "是" if config["need_scaler"] else "否",
+            "Log目标": "是" if log_used else "否",
         })
-        cv_results.append({
+        cv = cross_validate_model(df, features, name, use_log_target=use_log_target, **kwargs)
+        cv_info.append({
             "模型": config["label"],
-            "CV-R²均值": round(cv["mean_r2"], 4) if not np.isnan(cv["mean_r2"]) else np.nan,
-            "CV-R²标准差": round(cv["std_r2"], 4) if not np.isnan(cv["std_r2"]) else np.nan,
-            "CV-MAE均值": round(cv["mean_mae"], 1) if not np.isnan(cv["mean_mae"]) else np.nan,
-            "CV-MAE标准差": round(cv["std_mae"], 1) if not np.isnan(cv["std_mae"]) else np.nan,
+            "CV-R²": round(cv["mean_r2"], 4) if not np.isnan(cv["mean_r2"]) else np.nan,
+            "CV-R²_std": round(cv["std_r2"], 4) if not np.isnan(cv["std_r2"]) else np.nan,
+            "CV-MAE": round(cv["mean_mae"], 1) if not np.isnan(cv["mean_mae"]) else np.nan,
         })
-
-    return {
-        "models": models,
-        "train_info": pd.DataFrame(train_results),
-        "cv_scores": pd.DataFrame(cv_results),
-    }
+    return {"models": models, "train_info": pd.DataFrame(train_info),
+            "cv_scores": pd.DataFrame(cv_info)}
 
 
-# ========== 评估辅助函数 ==========
+def tune_hyperparameters(df, features, model_name, param_grid=None, cv=2, **kwargs):
+    """GridSearchCV 超参数调优"""
+    if model_name not in MODEL_CONFIGS:
+        return train_model(df, features, model_name, **kwargs)
 
-def evaluate_by_category(df, features, model, category_col, category_labels):
-    """
-    按类别分组评估模型表现
-    """
+    config = MODEL_CONFIGS[model_name]
+    grid = param_grid or PARAM_GRIDS.get(model_name, {})
+
+    if not grid:
+        return train_model(df, features, model_name, **kwargs)
+
+    train_data = df.dropna(subset=features + ["unit_price", "year"])
+    available_features = [f for f in features if f in train_data.columns]
+    X = train_data[available_features]
+    y = np.log1p(train_data["unit_price"].values)
+
+    tscv = TimeSeriesSplit(n_splits=cv)
+    base = _build_estimator(model_name, config["params"], available_features)
+
+    search = GridSearchCV(base, grid, cv=tscv, scoring="neg_mean_absolute_error",
+                          n_jobs=-1, verbose=0)
+    search.fit(X, y)
+
+    best_params = {k.replace("estimator__", ""): v for k, v in search.best_params_.items()}
+    merged = config["params"].copy()
+    merged.update(best_params)
+
+    return train_model(df, features, model_name, use_log_target=True, **merged)
+
+
+# ========== 辅助函数 ==========
+
+def evaluate_by_category(df, features, model, category_col, category_labels,
+                         use_log_target=True):
+    """按类别评估"""
     results = []
     valid_data = df.dropna(subset=features + ["unit_price"])
-
     for cat_value, cat_label in category_labels.items():
         subset = valid_data[valid_data[category_col] == cat_value]
         if len(subset) < 10:
             continue
-
         available_features = [f for f in features if f in subset.columns]
-        X_sub = subset[available_features]
-        y_sub = subset["unit_price"]
-
-        eval_result = evaluate_model(model, X_sub, y_sub)
-
+        ev = evaluate_model(model, subset[available_features],
+                            subset["unit_price"], use_log_target)
         results.append({
-            "房源类型": cat_label,
-            "MAE": eval_result["MAE"],
-            "MAPE": eval_result.get("MAPE", np.nan),
-            "R²": eval_result["R2"],
+            "房源类型": cat_label, "MAE": ev["MAE"],
+            "MAPE": ev.get("MAPE", np.nan), "R²": ev["R2"],
             "样本数": len(subset),
         })
-
     return pd.DataFrame(results)
 
 
 def get_feature_importance(model, feature_names=None):
-    """
-    获取特征重要性排名（自动识别线性模型和树模型）
-    """
-    # 处理 Pipeline
-    final_model = model
-    if isinstance(model, Pipeline):
-        final_model = model.named_steps["estimator"]
+    """获取特征重要性"""
+    final = model.named_steps["estimator"] if isinstance(model, Pipeline) else model
 
-    if hasattr(final_model, "feature_importances_"):
-        importance = final_model.feature_importances_
+    if hasattr(final, "feature_importances_"):
+        imp = final.feature_importances_
         imp_type = "feature_importances"
-    elif hasattr(final_model, "coef_"):
-        importance = np.abs(final_model.coef_)
-        if len(importance.shape) > 1:
-            importance = importance.flatten()
-        imp_type = "|coef| (已标准化)"
+    elif hasattr(final, "coef_"):
+        imp = np.abs(final.coef_).flatten()
+        imp_type = "|coef| (标准化后)"
     else:
-        return pd.DataFrame(columns=["特征", "重要性"]), ""
+        return pd.DataFrame(), ""
 
-    # 对齐特征名
-    if hasattr(final_model, "feature_names_in_"):
-        feature_names = list(final_model.feature_names_in_)
+    if hasattr(final, "feature_names_in_"):
+        feature_names = list(final.feature_names_in_)
     elif feature_names is None:
-        feature_names = [f"feat_{i}" for i in range(len(importance))]
+        feature_names = [f"x{i}" for i in range(len(imp))]
 
-    if len(importance) != len(feature_names):
-        return pd.DataFrame(columns=["特征", "重要性"]), ""
+    if len(imp) != len(feature_names):
+        return pd.DataFrame(), ""
 
-    imp_df = pd.DataFrame({
-        "特征": feature_names,
-        "重要性": importance,
-    }).sort_values("重要性", ascending=False).reset_index(drop=True)
-
-    return imp_df, imp_type
+    df_imp = pd.DataFrame({"特征": feature_names, "重要性": imp}).sort_values("重要性", ascending=False)
+    return df_imp.reset_index(drop=True), imp_type
 
 
-def predict_price(model, input_dict, feature_names):
-    """
-    使用训练好的模型预估房价
-    """
-    # 构建输入向量
-    input_row = {}
-    for feat in feature_names:
-        input_row[feat] = input_dict.get(feat, 0)
-
+def predict_price(model, input_dict, feature_names, use_log_target=True):
+    """价格预估"""
+    input_row = {f: input_dict.get(f, 0) for f in feature_names}
     input_df = pd.DataFrame([input_row])
-
-    # 按模型特征顺序排列
-    final_model = model
-    if isinstance(model, Pipeline):
-        final_model = model.named_steps["estimator"]
-
-    if hasattr(final_model, "feature_names_in_"):
-        input_df = input_df[final_model.feature_names_in_]
-
-    predicted_unit_price = model.predict(input_df)[0]
-    return max(predicted_unit_price, 0)
+    final = model.named_steps["estimator"] if isinstance(model, Pipeline) else model
+    if hasattr(final, "feature_names_in_"):
+        input_df = input_df[final.feature_names_in_]
+    pred = model.predict(input_df)[0]
+    return max(np.expm1(pred) if use_log_target else pred, 0)
 
 
-def find_prediction_errors(df, features, model, top_n=10):
-    """
-    找出预测误差最大的记录
-    """
-    valid_data = df.dropna(subset=features + ["unit_price"])
-    available_features = [f for f in features if f in valid_data.columns]
-
-    X = valid_data[available_features]
-    y_actual = valid_data["unit_price"]
-    y_pred = model.predict(X)
+def find_prediction_errors(df, features, model, top_n=10, use_log_target=True):
+    """找误差最大的记录"""
+    valid = df.dropna(subset=features + ["unit_price"])
+    final_est = model.named_steps["estimator"] if isinstance(model, Pipeline) else model
+    if hasattr(final_est, "feature_names_in_"):
+        required = [c for c in final_est.feature_names_in_ if c in valid.columns]
+    else:
+        required = [c for c in features if c in valid.columns]
+    X_arr = valid[required].fillna(0).values.astype(np.float64)
+    y_actual = valid["unit_price"].values.astype(np.float64)
+    y_pred_t = model.predict(X_arr)
+    y_pred = np.expm1(np.clip(y_pred_t, -50, 50)) if use_log_target else np.clip(y_pred_t, 0, None)
 
     errors = pd.DataFrame({
-        "index": valid_data.index,
-        "实际单价": y_actual.values,
-        "预测单价": y_pred,
-        "绝对误差": np.abs(y_actual.values - y_pred),
-        "误差百分比": np.abs((y_actual.values - y_pred) / y_actual.values) * 100,
+        "index": valid.index,
+        "实际单价": y_actual, "预测单价": y_pred,
+        "绝对误差": np.abs(y_actual - y_pred),
+        "误差%": np.abs((y_actual - y_pred) / np.clip(y_actual, 1, None)) * 100,
     })
-
-    # 合并原始信息
     result = errors.nlargest(top_n, "绝对误差").copy()
     info_cols = ["town", "flat_type", "street_name", "storey_range",
                  "floor_area_sqm", "remaining_years", "flat_age", "resale_price"]
     for col in info_cols:
-        if col in valid_data.columns:
-            result[col] = valid_data.loc[result["index"], col].values
-
+        if col in valid.columns:
+            result[col] = valid.loc[result["index"], col].values
     return result.reset_index(drop=True)
 
 
 def prepare_model_data(df):
-    """
-    按时间划分训练集和测试集
-    """
+    """按时间切分"""
     train_df = df[(df["year"] >= 2020) & (df["year"] <= 2023)].copy()
     test_df = df[df["year"] >= 2024].copy()
     return train_df, test_df

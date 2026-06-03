@@ -23,11 +23,135 @@ import sys
 
 # ========== 页面配置 ==========
 st.set_page_config(
-    page_title="新加坡HDB组屋转售价格分析与预测系统",
-    page_icon="🏠",
+    page_title="Singapore HDB Resale Analysis",
+    page_icon="◆",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# 全局 plotly 配色 — 禁用红色，统一轻奢金暖调
+LUX_COLORS = ["#c9a96e", "#8b9a8b", "#b8a88c", "#7b8c7b", "#d4c5a9", "#a89880",
+              "#b8956a", "#6b8b6b", "#c4b5a0", "#9b927e"]
+px.defaults.color_discrete_sequence = LUX_COLORS
+px.defaults.color_continuous_scale = ["#d4c5a9", "#f0e8d5", "#c9a96e", "#b8956a", "#8b6914"]
+
+# ========== 轻奢风 CSS ==========
+st.markdown("""
+<style>
+/* ==== Font & Global ==== */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=DM+Serif+Display&display=swap');
+
+html, body, [class*="css"] { font-family: 'Inter', -apple-system, 'PingFang SC', sans-serif; color: #3d3929; }
+
+.stApp { background: #faf9f6; }
+
+/* ==== Sidebar ==== */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #f5f1ea 0%, #faf9f6 100%);
+    border-right: 1px solid #e8e3d9;
+}
+[data-testid="stSidebar"] * { color: #5c5544 !important; }
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2 { color: #3d3929 !important; }
+[data-testid="stSidebar"] .stSelectbox label,
+[data-testid="stSidebar"] .stSlider label,
+[data-testid="stSidebar"] .stMultiSelect label {
+    color: #9b927e !important; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.1em; font-weight: 500;
+}
+
+/* ==== Headings ==== */
+h1 { font-family: 'DM Serif Display', 'Georgia', serif !important; font-size: 2rem !important;
+     font-weight: 400 !important; color: #2d2920 !important; letter-spacing: -0.01em; }
+h2 { font-size: 1.15rem !important; font-weight: 500 !important; color: #5c5544 !important;
+     border-bottom: 1px solid #e8e3d9; padding-bottom: 0.4rem; }
+h3 { font-size: 0.95rem !important; font-weight: 500 !important; color: #9b927e !important; }
+
+/* ==== Metric cards ==== */
+[data-testid="stMetric"] {
+    background: #ffffff;
+    border: 1px solid #ede8df;
+    border-radius: 12px;
+    padding: 1.2rem 1rem !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    transition: all 0.25s ease;
+}
+[data-testid="stMetric"]:hover {
+    border-color: #d4b896;
+    box-shadow: 0 4px 16px rgba(180,150,110,0.12);
+}
+[data-testid="stMetric"] label {
+    font-size: 0.68rem !important; text-transform: uppercase;
+    letter-spacing: 0.1em; color: #b8a88c !important; font-weight: 500;
+}
+[data-testid="stMetricValue"] {
+    font-family: 'Inter', monospace !important; font-size: 1.55rem !important;
+    font-weight: 600 !important; color: #2d2920 !important;
+}
+
+/* ==== DataFrame ==== */
+[data-testid="stDataFrame"] { border: 1px solid #ede8df; border-radius: 10px; overflow: hidden; }
+[data-testid="stDataFrame"] th {
+    background: #faf8f3 !important; color: #9b927e !important;
+    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 500;
+}
+[data-testid="stDataFrame"] td { font-size: 0.82rem; color: #5c5544; }
+
+/* ==== Tabs ==== */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 0; background: #ffffff; border-radius: 12px; border: 1px solid #ede8df; padding: 6px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+}
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px !important; padding: 0.5rem 1.3rem !important;
+    font-size: 0.82rem !important; color: #9b927e !important; font-weight: 500;
+    transition: all 0.2s;
+}
+.stTabs [data-baseweb="tab"][aria-selected="true"] {
+    background: linear-gradient(135deg, #c9a96e, #d4b896) !important;
+    color: #fff !important; box-shadow: 0 2px 8px rgba(180,140,100,0.25);
+}
+
+/* ==== Expander ==== */
+[data-testid="stExpander"] {
+    border: 1px solid #ede8df !important; border-radius: 12px !important;
+    background: #ffffff !important; box-shadow: 0 1px 3px rgba(0,0,0,0.03);
+}
+
+/* ==== Buttons ==== */
+.stButton > button {
+    background: linear-gradient(135deg, #c9a96e, #b8956a) !important;
+    border: none !important; color: #fff !important; border-radius: 8px !important;
+    font-weight: 500 !important; letter-spacing: 0.02em; transition: all 0.2s;
+    box-shadow: 0 2px 8px rgba(180,140,100,0.2);
+}
+.stButton > button:hover {
+    background: linear-gradient(135deg, #d4b896, #c9a96e) !important;
+    box-shadow: 0 4px 16px rgba(180,140,100,0.3); transform: translateY(-1px);
+}
+
+/* ==== Alert boxes ==== */
+[data-testid="stAlert"] { border-radius: 10px; font-size: 0.85rem; border: none; }
+div[data-testid="stAlert-info"] { background: #fcf9f2; border-left: 3px solid #d4b896; }
+
+/* ==== blockquote ==== */
+blockquote {
+    border-left: 3px solid #d4b896 !important; color: #9b927e !important;
+    padding: 0.5rem 1rem; margin: 0.5rem 0; font-style: italic; background: #fdfcf9;
+    border-radius: 0 6px 6px 0;
+}
+
+/* ==== Caption text ==== */
+.stCaption { color: #b8a88c !important; font-size: 0.8rem; }
+
+/* ==== Select / Slider ==== */
+[data-testid="stSelectbox"] label, [data-testid="stSlider"] label { color: #5c5544 !important; }
+
+/* ==== Radio ==== */
+[data-testid="stRadio"] label { color: #5c5544 !important; }
+
+/* ==== Divider ==== */
+hr { border-color: #ede8df !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # ========== 导入工具模块 ==========
 # 将项目根目录加入 Python 路径
@@ -283,7 +407,7 @@ with tab1:
                              name="成交量", yaxis="y", marker_color="lightblue"))
         fig.add_trace(go.Scatter(x=yearly_avg["year"], y=yearly_avg["均价"],
                                  name="均价 (S$/㎡)", yaxis="y2",
-                                 mode="lines+markers", line=dict(color="red", width=2)))
+                                 mode="lines+markers", line=dict(color="#c9a96e", width=2)))
         fig.update_layout(
             title="年度成交量与均价趋势",
             xaxis_title="年份",
@@ -339,19 +463,20 @@ with tab2:
         layers = []
 
         if map_mode == "镇区均价地图":
-            # 颜色映射 - 预计算颜色列
+            # 香槟金→深金色渐变（轻奢风）
             price_min = town_agg["avg_unit_price"].min()
             price_max = town_agg["avg_unit_price"].max()
             price_range = max(price_max - price_min, 1)
-            town_agg["color_r"] = 180 + 75 * (town_agg["avg_unit_price"] - price_min) / price_range
-            town_agg["color_g"] = 50
-            town_agg["color_b"] = 200 - 180 * (town_agg["avg_unit_price"] - price_min) / price_range
+            ratio = (town_agg["avg_unit_price"] - price_min) / price_range
+            town_agg["color_r"] = (212 - 28 * ratio).astype(int)
+            town_agg["color_g"] = (175 - 70 * ratio).astype(int)
+            town_agg["color_b"] = (120 - 95 * ratio).astype(int)
 
             scatter_layer = pdk.Layer(
                 "ScatterplotLayer",
                 data=town_agg,
                 get_position=["longitude", "latitude"],
-                get_fill_color="[color_r, color_g, color_b, 180]",
+                get_fill_color="[color_r, color_g, color_b, 200]",
                 get_radius="avg_unit_price * 1.5",
                 radius_min_pixels=15,
                 radius_max_pixels=60,
@@ -393,7 +518,7 @@ with tab2:
                 "ScatterplotLayer",
                 data=mrt_stations,
                 get_position=["longitude", "latitude"],
-                get_fill_color="[0, 200, 0, 200]",
+                get_fill_color="[100, 160, 150, 200]",
                 get_radius=100,
                 radius_min_pixels=4,
                 radius_max_pixels=8,
@@ -410,7 +535,7 @@ with tab2:
                 "ScatterplotLayer",
                 data=school_data,
                 get_position=["longitude", "latitude"],
-                get_fill_color="[255, 165, 0, 200]",
+                get_fill_color="[210, 180, 140, 200]",
                 get_radius=80,
                 radius_min_pixels=3,
                 radius_max_pixels=7,
@@ -430,13 +555,19 @@ with tab2:
         # 图例
         st.caption(f"📍 {map_year} 年 | 显示 {len(town_agg)} 个镇区")
 
-        # 渲染地图
+        # 渲染地图（Carto 免费底图，无需 token）
         st.pydeck_chart(pdk.Deck(
             layers=layers,
             initial_view_state=view_state,
             tooltip={"text": "{town}\n均价: S${avg_unit_price:.0f}/㎡\n成交量: {transaction_count} 套"},
-            map_style="mapbox://styles/mapbox/light-v10",
+            map_style="light",
         ))
+
+        # 备用：如果 pydeck 不显示，用 st.map 兜底
+        with st.expander("📌 备用简易地图（如上方地图不显示请展开）"):
+            map_df = town_agg.rename(columns={"latitude": "lat", "longitude": "lon"})
+            st.map(map_df[["lat", "lon", "avg_unit_price"]].dropna(),
+                   size="avg_unit_price", color=None)
 
         # 图例说明
         col1, col2, col3 = st.columns(3)
@@ -718,27 +849,28 @@ with tab4:
         feature_cols = get_feature_columns(all_features_df, include_town_dummies=True)
         train_df, test_df = prepare_model_data(all_features_df)
 
-        # 训练模型 + 交叉验证
-        model, X_train, y_train, used_features = train_model(
+        # 训练模型 + 交叉验证 (log 变换目标)
+        model, X_train, y_train_raw, used_features, log_used = train_model(
             all_features_df[all_features_df["year"] <= 2023],
             feature_cols,
             model_name=selected_model_name,
+            use_log_target=True,
             **model_kwargs,
         )
 
         cv_results = cross_validate_model(
             all_features_df, feature_cols,
             model_name=selected_model_name, n_splits=3,
-            **model_kwargs,
+            use_log_target=True, **model_kwargs,
         )
 
         # 评估模型（测试集）
         X_test_df = test_df[used_features].dropna()
         test_idx = X_test_df.index
         y_test = test_df.loc[test_idx, "unit_price"]
-        eval_results = evaluate_model(model, X_test_df, y_test)
+        eval_results = evaluate_model(model, X_test_df, y_test, use_log_target=log_used)
 
-        # 检查是否使用了 StandardScaler
+        # 检查配置
         config = MODEL_CONFIGS[selected_model_name]
         using_scaler = config["need_scaler"]
 
@@ -813,7 +945,7 @@ with tab4:
         fig.add_trace(go.Scatter(
             x=[min_val, max_val], y=[min_val, max_val],
             mode="lines", name="完美预测",
-            line=dict(color="red", dash="dash"),
+            line=dict(color="#9b927e", dash="dash", width=1),
         ))
         st.plotly_chart(fig, use_container_width=True)
 
@@ -843,16 +975,16 @@ with tab4:
 
         # 按户型分类评估
         size_labels = {"小户型": "小户型", "中户型": "中户型", "大户型": "大户型"}
-        size_results = evaluate_by_category(cat_df, used_features, model, "size_cat", size_labels)
+        size_results = evaluate_by_category(cat_df, used_features, model, "size_cat", size_labels, use_log_target=log_used)
 
         # 按新旧分类评估
         age_labels = {"老旧组屋": "老旧组屋", "新近组屋": "新近组屋"}
-        age_results = evaluate_by_category(cat_df, used_features, model, "age_cat", age_labels)
+        age_results = evaluate_by_category(cat_df, used_features, model, "age_cat", age_labels, use_log_target=log_used)
 
         # 按 MRT 分类评估
         if "mrt_cat" in cat_df.columns:
             mrt_labels = {"MRT沿线": "MRT沿线", "远离MRT": "远离MRT"}
-            mrt_results = evaluate_by_category(cat_df, used_features, model, "mrt_cat", mrt_labels)
+            mrt_results = evaluate_by_category(cat_df, used_features, model, "mrt_cat", mrt_labels, use_log_target=log_used)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -966,7 +1098,7 @@ with tab4:
             if feat not in input_dict:
                 input_dict[feat] = 0
 
-        predicted_unit = predict_price(model, input_dict, used_features)
+        predicted_unit = predict_price(model, input_dict, used_features, use_log_target=log_used)
         predicted_total = predicted_unit * input_area
 
         col1, col2, col3 = st.columns(3)
@@ -1073,7 +1205,7 @@ with tab5:
     st.subheader("预测误差最大的 10 套组屋")
 
     with st.spinner("正在计算预测误差..."):
-        error_df = find_prediction_errors(test_df, used_features, model, top_n=10)
+        error_df = find_prediction_errors(test_df, used_features, model, top_n=10, use_log_target=log_used)
 
     if len(error_df) > 0:
         st.dataframe(
@@ -1320,15 +1452,15 @@ with tab7:
                 type="line",
                 x0=event_str, x1=event_str,
                 y0=y_min, y1=y_max,
-                line=dict(dash="dash", color="red", width=1),
-                opacity=0.5,
+                line=dict(dash="dash", color="#b8a88c", width=1.5),
+                opacity=0.6,
             )
             fig.add_annotation(
                 x=event_str, y=y_max,
                 text=event["event"][:20],
                 showarrow=False,
                 yshift=10 + (i % 3) * 15,
-                font=dict(size=9, color="red"),
+                font=dict(size=9, color="#5c5544"),
             )
 
         fig.update_layout(
@@ -1366,7 +1498,7 @@ with tab7:
                 title=f"政策事件前后 {window_choice} 个月均价变化",
                 color="变化(%)",
                 text=impact_subset["变化(%)"].apply(lambda x: f"{x:+.1f}%"),
-                color_continuous_scale="RdBu",
+                color_continuous_scale=["#d4c5a9", "#f5f0e6", "#b8956a"],
                 color_continuous_midpoint=0,
             )
             fig.update_traces(textposition="outside")

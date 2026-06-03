@@ -83,37 +83,60 @@ def build_features(df, town_locations_df=None, mrt_df=None, schools_df=None):
     if "year" in feats.columns:
         feats["year_feat"] = feats["year"].astype(int) - 2020  # 以 2020 为基准
 
-    # 8. 镇区 One-Hot 编码（保留在特征中）
+    # 8. 镇区年度均价趋势（核心新增特征）
+    #    捕捉每个镇区的市场热度与趋势动量
+    town_year_price = feats.groupby(["town", "year"])["unit_price"].mean().reset_index()
+    town_year_price.columns = ["town", "year", "town_year_avg"]
+    feats = feats.merge(town_year_price, on=["town", "year"], how="left")
+
+    # 镇区最新年份均价（反映该镇区的"档次"）
+    latest_year = feats["year"].max()
+    town_latest = feats[feats["year"] == latest_year].groupby("town")["unit_price"].mean().reset_index()
+    town_latest.columns = ["town", "town_latest_price"]
+    feats = feats.merge(town_latest, on="town", how="left")
+
+    # 9. 镇区 One-Hot 编码
     town_dummies = pd.get_dummies(feats["town"], prefix="town")
     feats = pd.concat([feats, town_dummies], axis=1)
 
-    # 9. 房型 One-Hot 编码
+    # 10. 房型 One-Hot 编码
     flat_dummies = pd.get_dummies(feats["flat_type"], prefix="flat")
     feats = pd.concat([feats, flat_dummies], axis=1)
 
-    # 10. 交互特征
+    # 11. 交互与衍生特征
     feats["area_per_room"] = feats["floor_area_sqm"] / (feats["flat_type_code"] + 1)
     feats["age_lease_interact"] = feats["flat_age"] * (99 - feats["remaining_years"].clip(upper=99))
+    feats["lease_sq"] = (feats["remaining_years"] / 99) ** 2
+    feats["storey_sq"] = feats["storey_mid"] ** 2
+    feats["mature_lease"] = feats["is_mature"] * feats["remaining_years"]
+
+    # 去除重复列名（merge/concat 可能产生重复）
+    feats = feats.loc[:, ~feats.columns.duplicated()]
 
     return feats
 
 
 # 基础特征列名（用于模型训练）
 BASE_FEATURES = [
-    "floor_area_sqm",       # 建筑面积
-    "remaining_years",      # 剩余租约年限
-    "flat_age",             # 房龄
-    "storey_mid",           # 楼层中位数
-    "flat_type_code",       # 房型编码
-    "is_mature",            # 是否成熟区
-    "is_high_floor",        # 是否高楼层 (>=15)
-    "is_low_floor",         # 是否低楼层 (<=3)
-    "near_mrt",             # 是否接近MRT
-    "mrt_distance_km",      # 到MRT距离
-    "near_school",          # 是否接近学校
-    "year_feat",            # 成交年份特征
-    "area_per_room",        # 每房面积（面积/房型）
-    "age_lease_interact",   # 房龄×已消耗租约交互
+    "floor_area_sqm",
+    "remaining_years",
+    "flat_age",
+    "storey_mid",
+    "flat_type_code",
+    "is_mature",
+    "is_high_floor",
+    "is_low_floor",
+    "near_mrt",
+    "mrt_distance_km",
+    "near_school",
+    "year_feat",
+    "town_year_avg",         # ★ 镇区年度均价趋势
+    "town_latest_price",     # ★ 镇区最新均价（档次）
+    "area_per_room",
+    "age_lease_interact",
+    "lease_sq",              # ★ 租约平方
+    "storey_sq",             # ★ 楼层平方
+    "mature_lease",          # ★ 成熟区×租约
 ]
 
 
